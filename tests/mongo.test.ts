@@ -4,269 +4,77 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import mongoose from "mongoose";
 import { connectStorage } from "../src/database/connection.js";
+import { AuthService } from "../src/services/auth.js";
 import { CrmService } from "../src/services/crm.js";
-import { createApp } from "../src/app.js";
-import type { User } from "../src/domain.js";
+import { newToken, tokenHash } from "../src/security/passwords.js";
 
-// Opt-in: each run owns a new, randomly named database, never the application's DB.
-test(
-  "MongoDB: persistence, seed safety, transactions and access control",
-  {
-    skip: process.env.RUN_MONGODB_TESTS !== "true",
-    timeout: 120000,
-  },
-  async (t) => {
-    const uri = process.env.MONGODB_URI;
-    assert(uri, "Set MONGODB_URI in api/.env before running test:mongo");
-    const databaseName = `salespace_test_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
-    let storage: Awaited<ReturnType<typeof connectStorage>> | undefined;
-    const manager: User = {
-      id: "u-manager",
-      name: "Данияр Омаров",
-      role: "manager",
-    };
-    const admin: User = { id: "u-admin", name: "Александр Ким", role: "admin" };
-    const payload = {
-      name: "Проверка MongoDB",
-      company: "Тестовая компания",
-      email: "test@example.kz",
-      phone: "+7 701 123 45 67",
-      city: "Алматы",
-      stage: "new" as const,
-      source: "Сайт",
-      notes: "",
-    };
-    try {
-      storage = await connectStorage(uri, databaseName, true);
-      assert.equal(storage.seedResult, "created");
+test("MongoDB: migration, authentication, persistence and transactions", { skip: process.env.RUN_MONGODB_TESTS !== "true", timeout: 120000 }, async t => {
+  const uri = process.env.MONGODB_URI; assert(uri);
+  const databaseName = `salespace_test_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
+  let storage: Awaited<ReturnType<typeof connectStorage>> | undefined;
+  const raw = await mongoose.createConnection(uri, { dbName: databaseName }).asPromise();
+  const payload = { name: "Actual client", company: "Company", email: "test@example.com", phone: "123456789", city: "City", stage: "new" as const, source: "Сайт", notes: "" };
+  try {
+    // A legacy database with a seed ID plus a UUID record entered by a person.
+    await raw.db!.collection("clients").insertMany([
+      { _id: "c-1" as never, ...payload, ownerId: "u-admin", createdAt: new Date().toISOString() },
+      { _id: "real-client" as never, ...payload, ownerId: "u-admin", createdAt: new Date().toISOString() },
+    ]);
+    await raw.db!.collection("users").insertOne({ _id: "u-admin" as never, name: "Old demo", role: "admin" });
+    storage = await connectStorage(uri, databaseName);
+    await t.test("migration archives only seed IDs and is idempotent", async () => {
+      assert.equal((await storage!.repositories.users.findAll()).length, 0);
+      assert.deepEqual((await storage!.repositories.clients.findAll()).map(c => c.id), ["real-client"]);
+      assert.equal(await raw.db!.collection("_legacy_demo_archive").countDocuments(), 2);
+      await storage!.close(); storage = await connectStorage(uri, databaseName);
+      assert.equal(await raw.db!.collection("_legacy_demo_archive").countDocuments(), 2);
+    });
+    const invite = newToken();
+    await storage.repositories.invites.create({ id: tokenHash(invite), email: "admin@example.com", role: "admin", expiresAt: new Date(Date.now() + 60000) });
+    const auth = new AuthService(storage.repositories);
+    const admin = await auth.register({ name: "Admin", email: "admin@example.com", password: "Secure test password 1!", inviteToken: invite });
+    const manager = await auth.register({ name: "Manager", email: "manager@example.com", password: "Secure test password 2!" });
+    let crm = new CrmService(storage.repositories);
+    await t.test("real legacy client transfers to admin and never leaks to manager", async () => {
+      assert.equal((await crm.get("clients", "real-client", admin.user)).ownerId, admin.user.id);
+      assert.equal((await crm.list("clients", manager.user)).length, 0);
+      await assert.rejects(crm.get("clients", "real-client", manager.user), { status: 404 });
+    });
+    const client = await crm.create("clients", payload, manager.user);
+    await t.test("rollback and concurrent writes preserve relationships", async () => {
+      await assert.rejects(storage!.repositories.transaction(async () => { await storage!.repositories.clients.update(client.id, { notes: "rollback" }); throw new Error("rollback"); }));
+      assert.equal((await crm.get("clients", client.id, manager.user)).notes, "");
+      const results = await Promise.allSettled([
+        crm.deleteClient(client.id, manager.user),
+        crm.create("deals", { title: "Real deal", clientId: client.id, amount: 50, stage: "new" }, manager.user),
+      ]);
+      assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
+      const parent = await storage!.repositories.clients.findById(client.id);
+      const linked = (await storage!.repositories.deals.findAll()).filter(d => d.clientId === client.id);
+      assert.equal(linked.length, parent ? 1 : 0);
+    });
+    await t.test("unique emails reject concurrent registration", async () => {
+      const results = await Promise.allSettled([1, 2].map(() => auth.register({ name: "Unique", email: "unique@example.com", password: "Secure unique password!" })));
+      assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
+      assert.equal((await storage!.repositories.users.findAll()).filter(u => u.email === "unique@example.com").length, 1);
+    });
+    await t.test("session and password survive reconnect; logout remains revoked", async () => {
+      await storage!.close(); storage = await connectStorage(uri, databaseName); crm = new CrmService(storage.repositories);
+      const nextAuth = new AuthService(storage.repositories);
+      assert.equal((await nextAuth.current(admin.token))?.id, admin.user.id);
+      const login = await nextAuth.login("manager@example.com", "Secure test password 2!");
+      assert.equal(login.user.id, manager.user.id);
+      await nextAuth.logout(login.token);
+      assert.equal(await nextAuth.current(login.token), undefined);
+      await nextAuth.throttle("persistent", 1);
+      await storage!.close(); storage = await connectStorage(uri, databaseName);
+      await assert.rejects(new AuthService(storage.repositories).throttle("persistent", 1), { status: 429 });
       assert.equal(await storage.isHealthy(), true);
-      assert.equal((await storage.repositories.users.findAll()).length, 3);
-      assert.equal((await storage.repositories.clients.findAll()).length, 15);
-      assert.equal((await storage.repositories.deals.findAll()).length, 12);
-      assert.equal((await storage.repositories.tasks.findAll()).length, 10);
-      let service = new CrmService(storage.repositories);
-      let clientId = "";
-      await t.test(
-        "HTTP contracts and manager visibility use MongoDB",
-        async () => {
-          const server = createApp(
-            "http://localhost:3000",
-            storage!.repositories,
-            storage!.isHealthy,
-          ).listen(0, "127.0.0.1");
-          await new Promise<void>((resolve) =>
-            server.once("listening", resolve),
-          );
-          try {
-            const address = server.address();
-            assert(address && typeof address === "object");
-            const base = `http://127.0.0.1:${address.port}`;
-            const list = await fetch(`${base}/clients`, {
-              headers: { "X-User-Id": manager.id },
-            });
-            assert.equal(list.status, 200);
-            const rows = await list.json();
-            assert.equal(rows.length, 5);
-            assert(
-              rows.every(
-                (row: { ownerId: string }) => row.ownerId === manager.id,
-              ),
-            );
-            assert.equal(
-              (
-                await fetch(`${base}/clients/c-1`, {
-                  headers: { "X-User-Id": manager.id },
-                })
-              ).status,
-              404,
-            );
-            const create = await fetch(`${base}/clients`, {
-              method: "POST",
-              headers: {
-                "X-User-Id": manager.id,
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify(payload),
-            });
-            assert.equal(create.status, 201);
-            const saved = await create.json();
-            clientId = saved.id;
-            assert.equal(saved.ownerId, manager.id);
-            assert.equal(saved._id, undefined);
-          } finally {
-            server.closeAllConnections();
-            await new Promise<void>((resolve) => server.close(() => resolve()));
-          }
-        },
-      );
-      await t.test(
-        "PATCH preserves fields and linked records enforce ownership",
-        async () => {
-          await service.update(
-            "clients",
-            clientId,
-            { notes: "Сохранённая заметка" },
-            manager,
-          );
-          const updated = await service.get("clients", clientId, manager);
-          assert.equal(updated.stage, "new");
-          assert.equal(updated.notes, "Сохранённая заметка");
-          const deal = await service.create(
-            "deals",
-            {
-              title: "Сохранённая сделка",
-              amount: 123456.78,
-              stage: "qualified",
-              clientId,
-            },
-            manager,
-          );
-          await service.update("deals", deal.id, { stage: "payment" }, manager);
-          assert.equal(
-            (await service.get("deals", deal.id, manager)).amount,
-            123456.78,
-          );
-          await assert.rejects(service.deleteClient(clientId, manager), {
-            status: 409,
-          });
-          await assert.rejects(
-            service.update("clients", clientId, { ownerId: admin.id }, admin),
-            { status: 409 },
-          );
-          await assert.rejects(
-            service.create(
-              "tasks",
-              {
-                title: "Чужая задача",
-                clientId: "c-1",
-                dueDate: "2026-12-01",
-                completed: false,
-              },
-              manager,
-            ),
-            { status: 404 },
-          );
-          const task = await service.create(
-            "tasks",
-            {
-              title: "Завершить проверку",
-              clientId,
-              dueDate: "2026-12-01",
-              completed: false,
-            },
-            manager,
-          );
-          await service.update("tasks", task.id, { completed: true }, manager);
-          assert.equal(
-            (await service.get("tasks", task.id, manager)).completed,
-            true,
-          );
-          await assert.rejects(service.get("clients", "c-1", manager), {
-            status: 404,
-          });
-          await assert.rejects(
-            service.update("clients", clientId, { ownerId: admin.id }, manager),
-            { status: 403 },
-          );
-        },
-      );
-      await t.test("failed transactions roll back all writes", async () => {
-        await assert.rejects(
-          storage!.repositories.transaction(async () => {
-            await storage!.repositories.clients.update(clientId, {
-              notes: "Откатить",
-            });
-            throw new Error("Expected rollback");
-          }),
-          /Expected rollback/,
-        );
-        assert.equal(
-          (await service.get("clients", clientId, manager)).notes,
-          "Сохранённая заметка",
-        );
-      });
-      await t.test(
-        "concurrent deletion and related creation cannot produce an orphan",
-        async () => {
-          const client = await service.create("clients", payload, manager);
-          const outcomes = await Promise.allSettled([
-            service.deleteClient(client.id, manager),
-            service.create(
-              "deals",
-              {
-                title: "Гонка операций",
-                amount: 100,
-                stage: "new",
-                clientId: client.id,
-              },
-              manager,
-            ),
-          ]);
-          assert.equal(
-            outcomes.filter((result) => result.status === "fulfilled").length,
-            1,
-          );
-          const parent = await storage!.repositories.clients.findById(
-            client.id,
-          );
-          const related = (await storage!.repositories.deals.findAll()).filter(
-            (row) => row.clientId === client.id,
-          );
-          assert(parent ? related.length === 1 : related.length === 0);
-        },
-      );
-      await t.test(
-        "reconnecting preserves updates and does not restore deleted seed records",
-        async () => {
-          await service.deleteClient("c-15", manager);
-          await storage!.close();
-          storage = await connectStorage(uri, databaseName, true);
-          service = new CrmService(storage.repositories);
-          assert.equal(storage.seedResult, "already-seeded");
-          assert.equal(
-            (await service.get("clients", clientId, manager)).notes,
-            "Сохранённая заметка",
-          );
-          assert.equal(
-            await storage.repositories.clients.findById("c-15"),
-            undefined,
-          );
-          assert.equal(
-            (await service.list("deals", manager)).some(
-              (deal) => deal.clientId === clientId && deal.stage === "payment",
-            ),
-            true,
-          );
-          assert.equal(
-            (await service.list("tasks", manager)).some(
-              (task) => task.clientId === clientId && task.completed,
-            ),
-            true,
-          );
-        },
-      );
-      await t.test(
-        "health fails when the database is disconnected",
-        async () => {
-          await storage!.close();
-          assert.equal(await storage!.isHealthy(), false);
-        },
-      );
-    } finally {
-      await storage?.close();
-      // Only the fresh random DB created by this test is removed.
-      assert.match(databaseName, /^salespace_test_[a-f0-9]{16}$/);
-      const cleanup = await mongoose
-        .createConnection(uri, {
-          dbName: databaseName,
-          serverSelectionTimeoutMS: 10000,
-        })
-        .asPromise();
-      try {
-        await cleanup.dropDatabase();
-      } finally {
-        await cleanup.close();
-      }
-    }
-  },
-);
+      await storage.close(); assert.equal(await storage.isHealthy(), false);
+    });
+  } finally {
+    await storage?.close();
+    assert.match(databaseName, /^salespace_test_[a-f0-9]{16}$/);
+    await raw.dropDatabase(); await raw.close();
+  }
+});

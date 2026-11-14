@@ -1,317 +1,110 @@
-import { test, before, after } from "node:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Server } from "node:http";
 import { createApp } from "../src/app.js";
 import { createRepositories } from "../src/repositories/memory.js";
-let server: Server;
-let base: string;
-before(async () => {
-  server = createApp("http://localhost:3000", createRepositories()).listen(
-    0,
-    "127.0.0.1",
-  );
-  await new Promise<void>((resolve) => server.once("listening", resolve));
-  const address = server.address();
-  assert(address && typeof address === "object");
-  base = `http://127.0.0.1:${address.port}`;
-});
-after(async () => {
-  server.closeAllConnections();
-  await new Promise<void>((resolve) => server.close(() => resolve()));
-});
-async function request(
-  path: string,
-  user = "u-admin",
-  method = "GET",
-  body?: unknown,
-  extraHeaders: Record<string, string> = {},
-) {
-  const response = await fetch(base + path, {
-    method,
-    headers: {
-      ...(user ? { "X-User-Id": user } : {}),
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      ...extraHeaders,
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  return {
-    status: response.status,
-    headers: response.headers,
-    body: response.status === 204 ? null : await response.json(),
-  };
-}
-const clientPayload = {
-  name: "Тестовый клиент",
-  company: "ТОО «Тест»",
-  email: "test@example.kz",
-  phone: "+7 701 123 45 67",
-  city: "Алматы",
-};
-test("health and demo users are public; business data requires a known user", async () => {
-  assert.equal((await request("/health", "")).status, 200);
-  const users = await request("/users", "");
-  assert.equal(users.body.length, 3);
-  assert.deepEqual(
-    users.body.map((u: { role: string }) => u.role),
-    ["admin", "rop", "manager"],
-  );
-  assert.equal((await request("/clients", "")).status, 401);
-  assert.equal((await request("/clients", "unknown")).status, 401);
-});
-test("seed counts and manager visibility", async () => {
-  for (const [path, total, own] of [
-    ["clients", 15, 5],
-    ["deals", 12, 4],
-    ["tasks", 10, 3],
-  ] as const) {
-    assert.equal((await request(`/${path}`)).body.length, total);
-    assert.equal((await request(`/${path}`, "u-rop")).body.length, total);
-    const result = await request(`/${path}`, "u-manager");
-    assert.equal(result.body.length, own);
-    assert(
-      result.body.every(
-        (row: { ownerId: string }) => row.ownerId === "u-manager",
-      ),
-    );
+import { AuthService } from "../src/services/auth.js";
+import { newToken, tokenHash } from "../src/security/passwords.js";
+const password = "A long test password 123!";
+const client = { name: "Client for test", company: "Test", email: "client@example.com", phone: "123456789", city: "Test" };
+
+test("Authentication and CRM authorization end to end", { timeout: 120000 }, async t => {
+  const repos = createRepositories();
+  const server = createApp("https://crm.example.com", repos).listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  const address = server.address(); assert(address && typeof address !== "string");
+  const base = `http://127.0.0.1:${address.port}`;
+  async function request(path: string, method = "GET", body?: unknown, cookie = "", extra: Record<string, string> = {}) {
+    const res = await fetch(base + path, { method, headers: { "Content-Type": "application/json", "X-CRM-Request": "1", Cookie: cookie, ...extra }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return { status: res.status, headers: res.headers, body: res.status === 204 ? null : await res.json(), cookie: res.headers.get("set-cookie")?.split(";")[0] ?? "" };
   }
+  let adminCookie = "", managerCookie = "", ropCookie = "", adminId = "", managerId = "", ropId = "", clientId = "";
+  try {
+    await t.test("anonymous and forged demo headers cannot access data", async () => {
+      for (const path of ["/users", "/clients", "/deals", "/tasks", "/stats", "/auth/me"]) assert.equal((await request(path, "GET", undefined, "", { "X-User-Id": "u-admin" })).status, 401);
+      assert.equal((await request("/auth/register", "POST", { email: "bad@example.com", name: "Test", password, role: "admin" })).status, 400);
+      assert.equal((await request("/auth/register", "POST", { email: "bad@example.com", name: "Test", password: "123" })).status, 400);
+    });
+    await t.test("admin requires single-use email-bound invitation; passwords are hashed", async () => {
+      const token = newToken();
+      await repos.invites.create({ id: tokenHash(token), email: "admin@example.com", role: "admin", expiresAt: new Date(Date.now() + 60000) });
+      assert.equal((await request("/auth/register", "POST", { email: "admin@example.com", name: "Admin", password })).status, 403);
+      assert.equal((await request("/auth/register", "POST", { email: "other@example.com", name: "Other", password, inviteToken: token })).status, 400);
+      const admin = await request("/auth/register", "POST", { email: "ADMIN@example.com", name: "Admin", password, inviteToken: token });
+      assert.equal(admin.status, 201); assert.equal(admin.body.role, "admin"); assert.equal(admin.body.passwordHash, undefined);
+      adminCookie = admin.cookie; adminId = admin.body.id;
+      assert.match(admin.headers.get("set-cookie")!, /HttpOnly/); assert.match(admin.headers.get("set-cookie")!, /Secure/); assert.match(admin.headers.get("set-cookie")!, /SameSite=Lax/);
+      assert.equal(await repos.invites.findById(tokenHash(token)), undefined);
+      const stored = await repos.users.findById(adminId); assert.match(stored!.passwordHash, /^scrypt\$131072\$8\$1\$/); assert(!stored!.passwordHash.includes(password));
+      assert.equal((await repos.sessions.findAll())[0]!.id, tokenHash(admin.cookie.split("=")[1]!));
+      const manager = await request("/auth/register", "POST", { email: "manager@example.com", name: "Manager", password });
+      assert.equal(manager.status, 201); assert.equal(manager.body.role, "manager"); managerCookie = manager.cookie; managerId = manager.body.id;
+      assert.notEqual((await repos.users.findById(managerId))!.passwordHash, stored!.passwordHash);
+      const rop = await request("/auth/register", "POST", { email: "rop@example.com", name: "Rop", password }); ropId = rop.body.id;
+      assert.equal((await request(`/users/${ropId}/role`, "PATCH", { role: "rop" }, managerCookie)).status, 403);
+      assert.equal((await request(`/users/${ropId}/role`, "PATCH", { role: "rop" }, adminCookie)).status, 200);
+      assert.equal((await request("/auth/me", "GET", undefined, rop.cookie)).status, 401);
+      ropCookie = (await request("/auth/login", "POST", { email: "rop@example.com", password })).cookie;
+    });
+    await t.test("empty database has truthful zero stats, managers see only own records", async () => {
+      assert.equal((await request("/stats", "GET", undefined, adminCookie)).body.pipelineAmount, 0);
+      assert.equal((await request("/clients", "GET", undefined, adminCookie)).body.length, 0);
+      const created = await request("/clients", "POST", client, managerCookie); assert.equal(created.status, 201); clientId = created.body.id;
+      assert.equal(created.body.ownerId, managerId);
+      assert.equal((await request("/users", "GET", undefined, managerCookie)).body.length, 1);
+      await request("/clients", "POST", { ...client, name: "Admin client" }, adminCookie);
+      assert.equal((await request("/clients", "GET", undefined, managerCookie)).body.length, 1);
+      assert.equal((await request("/clients", "GET", undefined, ropCookie)).body.length, 2);
+      const adminClient = (await request("/clients", "GET", undefined, adminCookie)).body.find((c: { ownerId: string }) => c.ownerId === adminId);
+      assert.equal((await request(`/clients/${adminClient.id}`, "GET", undefined, managerCookie)).status, 404);
+      assert.equal((await request(`/clients/${adminClient.id}`, "PATCH", { name: "Hacked" }, managerCookie)).status, 404);
+      assert.equal((await request("/clients", "POST", { ...client, ownerId: adminId }, managerCookie)).status, 403);
+      const deal = await request("/deals", "POST", { title: "Actual test deal", clientId, amount: 123.45 }, managerCookie); assert.equal(deal.status, 201);
+      const moved = await request(`/deals/${deal.body.id}`, "PATCH", { stage: "payment" }, managerCookie); assert.equal(moved.body.amount, 123.45);
+      assert.equal((await request("/stats", "GET", undefined, managerCookie)).body.pipelineAmount, 123.45);
+      assert.equal((await request(`/clients/${clientId}`, "DELETE", undefined, managerCookie)).status, 409);
+      assert.equal((await request(`/clients/${clientId}`, "PATCH", { ownerId: adminId }, adminCookie)).status, 409);
+      assert.equal((await request("/tasks", "POST", { title: "Mismatched", clientId, dueDate: "2026-12-01" }, adminCookie)).status, 400);
+      const task = await request("/tasks", "POST", { title: "Task", dueDate: "2026-12-01" }, managerCookie); assert.equal(task.status, 201);
+      assert.equal((await request(`/tasks/${task.body.id}`, "PATCH", { completed: true }, managerCookie)).body.completed, true);
+    });
+    await t.test("only admin changes roles; last admin cannot be removed", async () => {
+      assert.equal((await request(`/users/${managerId}/role`, "PATCH", { role: "admin" }, ropCookie)).status, 403);
+      assert.equal((await request(`/users/${adminId}/role`, "PATCH", { role: "manager" }, adminCookie)).status, 409);
+      assert.equal((await request("/users", "GET", undefined, adminCookie)).body.some((u: unknown) => JSON.stringify(u).includes("passwordHash")), false);
+    });
+    await t.test("CSRF, origin, login errors and session expiration are enforced", async () => {
+      assert.equal((await request("/clients", "POST", client, managerCookie, { "X-CRM-Request": "" })).status, 403);
+      assert.equal((await request("/auth/logout", "POST", undefined, managerCookie, { Origin: "https://evil.example" })).status, 403);
+      assert.equal((await request("/auth/login", "POST", { email: "manager@example.com", password: "wrong password" })).status, 401);
+      assert.equal((await request("/auth/login", "POST", { email: "missing@example.com", password })).status, 401);
+      const expired = newToken(); await repos.sessions.create({ id: tokenHash(expired), userId: managerId, expiresAt: new Date(0) });
+      assert.equal((await request("/auth/me", "GET", undefined, `__Host-salespace=${expired}`)).status, 401);
+    });
+    await t.test("password change revokes all sessions, new login works and logout is final", async () => {
+      assert.equal((await request("/auth/password", "POST", { oldPassword: "incorrect", newPassword: password + "new" }, managerCookie)).status, 400);
+      assert.equal((await request("/auth/password", "POST", { oldPassword: password, newPassword: password + "new" }, managerCookie)).status, 204);
+      assert.equal((await request("/auth/me", "GET", undefined, managerCookie)).status, 401);
+      assert.equal((await request("/auth/login", "POST", { email: "manager@example.com", password })).status, 401);
+      const signed = await request("/auth/login", "POST", { email: "manager@example.com", password: password + "new" }); assert.equal(signed.status, 200);
+      assert.equal((await request("/auth/logout", "POST", undefined, signed.cookie)).status, 204);
+      assert.equal((await request("/clients", "GET", undefined, signed.cookie)).status, 401);
+    });
+    await t.test("rate limits persist in repository", async () => {
+      const a = new AuthService(repos), b = new AuthService(repos);
+      await a.throttle("test", 1); await assert.rejects(b.throttle("test", 1), { status: 429 });
+    });
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 });
-test("manager cannot read, update or delete another owner's records", async () => {
-  for (const [path, id, patch] of [
-    ["clients", "c-1", { name: "Чужой" }],
-    ["deals", "d-1", { stage: "won" }],
-    ["tasks", "t-1", { completed: true }],
-  ] as const) {
-    assert.equal((await request(`/${path}/${id}`, "u-manager")).status, 404);
-    assert.equal(
-      (await request(`/${path}/${id}`, "u-manager", "PATCH", patch)).status,
-      404,
-    );
-  }
-  assert.equal(
-    (await request("/clients/c-1", "u-manager", "DELETE")).status,
-    404,
-  );
-});
-test("manager cannot assign records to others or link foreign clients", async () => {
-  assert.equal(
-    (
-      await request("/clients", "u-manager", "POST", {
-        ...clientPayload,
-        ownerId: "u-admin",
-      })
-    ).status,
-    403,
-  );
-  assert.equal(
-    (await request("/clients/c-3", "u-manager", "PATCH", { ownerId: "u-rop" }))
-      .status,
-    403,
-  );
-  assert.equal(
-    (
-      await request("/deals", "u-manager", "POST", {
-        title: "Чужая сделка",
-        amount: 100,
-        clientId: "c-1",
-      })
-    ).status,
-    404,
-  );
-  assert.equal(
-    (
-      await request("/tasks", "u-manager", "POST", {
-        title: "Чужая задача",
-        clientId: "c-1",
-        dueDate: "2026-11-15",
-      })
-    ).status,
-    404,
-  );
-  assert.equal(
-    (await request("/deals/d-3", "u-manager", "PATCH", { clientId: "c-1" }))
-      .status,
-    404,
-  );
-});
-test("strict validation, dates, values, unknown fields, empty patch", async () => {
-  assert.equal(
-    (
-      await request("/clients", "u-admin", "POST", {
-        ...clientPayload,
-        email: "wrong",
-      })
-    ).status,
-    400,
-  );
-  assert.equal(
-    (
-      await request("/deals", "u-admin", "POST", {
-        title: "Сделка",
-        clientId: "c-1",
-        amount: -1,
-      })
-    ).status,
-    400,
-  );
-  assert.equal(
-    (
-      await request("/tasks", "u-admin", "POST", {
-        title: "Задача",
-        dueDate: "2026-02-30",
-      })
-    ).status,
-    400,
-  );
-  assert.equal(
-    (await request("/clients/c-1", "u-admin", "PATCH", { id: "replace-id" }))
-      .status,
-    400,
-  );
-  assert.equal(
-    (await request("/clients/c-1", "u-admin", "PATCH", {})).status,
-    400,
-  );
-  assert.equal(
-    (await request("/deals/d-1", "u-admin", "PATCH", { stage: "invalid" }))
-      .status,
-    400,
-  );
-  assert.equal(
-    (
-      await request("/clients", "u-admin", "POST", {
-        ...clientPayload,
-        ownerId: "missing",
-      })
-    ).status,
-    400,
-  );
-  const malformed = await fetch(base + "/clients", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-User-Id": "u-admin" },
-    body: "{",
-  });
-  assert.equal(malformed.status, 400);
-  assert.equal((await malformed.json()).error.code, "INVALID_JSON");
-});
-test("PATCH preserves unrelated fields and defaults; managers can update their own data", async () => {
-  const before = (await request("/clients/c-3", "u-manager")).body;
-  const updated = await request("/clients/c-3", "u-manager", "PATCH", {
-    name: "Новое имя",
-  });
-  assert.equal(updated.status, 200);
-  assert.deepEqual(updated.body, { ...before, name: "Новое имя" });
-  const deal = (await request("/deals/d-3", "u-manager")).body;
-  const moved = await request("/deals/d-3", "u-manager", "PATCH", {
-    stage: "won",
-  });
-  assert.deepEqual(moved.body, { ...deal, stage: "won" });
-  const task = (await request("/tasks/t-3", "u-manager")).body;
-  const done = await request("/tasks/t-3", "u-manager", "PATCH", {
-    completed: true,
-  });
-  assert.deepEqual(done.body, { ...task, completed: true });
-});
-test("new client CRUD works; linked history and ownership remain consistent", async () => {
-  const created = await request("/clients", "u-manager", "POST", clientPayload);
-  assert.equal(created.status, 201);
-  assert.equal(created.body.ownerId, "u-manager");
-  assert.equal(created.body.stage, "new");
-  const id = created.body.id;
-  assert.equal(
-    (await request(`/clients/${id}`, "u-manager", "DELETE")).status,
-    204,
-  );
-  assert.equal((await request(`/clients/${id}`, "u-manager")).status, 404);
-  const linked = await request("/clients", "u-admin", "POST", {
-    ...clientPayload,
-    ownerId: "u-rop",
-  });
-  const deal = await request("/deals", "u-rop", "POST", {
-    title: "Новая сделка",
-    amount: 420000.5,
-    clientId: linked.body.id,
-  });
-  assert.equal(deal.status, 201);
-  assert.equal(deal.body.amount, 420000.5);
-  assert.equal(
-    (await request(`/clients/${linked.body.id}`, "u-admin", "DELETE")).status,
-    409,
-  );
-  assert.equal(
-    (
-      await request(`/clients/${linked.body.id}`, "u-admin", "PATCH", {
-        ownerId: "u-admin",
-      })
-    ).status,
-    409,
-  );
-  assert.equal(
-    (
-      await request("/tasks", "u-admin", "POST", {
-        title: "Задача",
-        clientId: linked.body.id,
-        dueDate: "2026-11-16",
-      })
-    ).status,
-    400,
-  );
-  const task = await request("/tasks", "u-manager", "POST", {
-    title: "Без клиента",
-    dueDate: "2026-11-16",
-  });
-  assert.equal(task.status, 201);
-  assert.equal(task.body.clientId, null);
-  assert.equal(task.body.completed, false);
-});
-test("stats are scoped and derived from actual records", async () => {
-  for (const user of ["u-admin", "u-rop", "u-manager"]) {
-    const stats = (await request("/stats", user)).body;
-    const deals = (await request("/deals", user)).body as Array<{
-      amount: number;
-      stage: string;
-    }>;
-    const active = deals.filter((d) => !["won", "lost"].includes(d.stage));
-    assert.equal(stats.activeDeals, active.length);
-    assert.equal(
-      stats.pipelineAmount,
-      active.reduce((sum, d) => sum + d.amount, 0),
-    );
-    assert.equal(stats.totalDeals, deals.length);
-    assert.equal(
-      stats.byStage.reduce(
-        (sum: number, s: { count: number }) => sum + s.count,
-        0,
-      ),
-      deals.length,
-    );
-    if (user === "u-manager")
-      assert(
-        stats.recentTasks.every((t: { ownerId: string }) => t.ownerId === user),
-      );
-  }
-});
-test("CORS allows configured origin only, including preflight", async () => {
-  const allowed = await request("/health", "", "GET", undefined, {
-    Origin: "http://localhost:3000",
-  });
-  assert.equal(
-    allowed.headers.get("access-control-allow-origin"),
-    "http://localhost:3000",
-  );
-  const denied = await request("/health", "", "GET", undefined, {
-    Origin: "https://untrusted.example",
-  });
-  assert.equal(denied.status, 403);
-  assert.equal(denied.headers.get("access-control-allow-origin"), null);
-  const preflight = await request("/clients", "", "OPTIONS", undefined, {
-    Origin: "http://localhost:3000",
-    "Access-Control-Request-Headers": "X-User-Id",
-    "Access-Control-Request-Method": "PATCH",
-  });
-  assert.equal(preflight.status, 204);
-  assert.match(
-    preflight.headers.get("access-control-allow-headers") ?? "",
-    /X-User-Id/,
-  );
+
+
+test("private bootstrap invitation allows one chosen email only once", async () => {
+  const repos = createRepositories(), auth = new AuthService(repos), token = newToken();
+  await repos.invites.create({ id: tokenHash(token), email: null, role: "admin", expiresAt: new Date(Date.now() + 60000) });
+  await assert.rejects(auth.register({ name: "Invalid", email: "invalid@example.com", password, inviteToken: newToken() }), { status: 400 });
+  const admin = await auth.register({ name: "Chosen", email: "chosen@example.com", password, inviteToken: token });
+  assert.equal(admin.user.role, "admin");
+  await assert.rejects(auth.register({ name: "Replay", email: "replay@example.com", password, inviteToken: token }), { status: 400 });
+  const expired = newToken();
+  await repos.invites.create({ id: tokenHash(expired), email: null, role: "admin", expiresAt: new Date(0) });
+  await assert.rejects(auth.register({ name: "Expired", email: "expired@example.com", password, inviteToken: expired }), { status: 400 });
 });

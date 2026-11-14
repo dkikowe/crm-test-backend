@@ -7,15 +7,15 @@ export function toStored<T extends { id: string }>(entity: T): Stored<T> {
   const { id, ...fields } = entity;
   return { ...fields, _id: id };
 }
-function fromStored<T extends { id: string }>(document: Stored<T>): T {
+export function fromStored<T extends { id: string }>(document: Stored<T>): T {
   const { _id, ...fields } = document;
   return { ...fields, id: _id } as unknown as T;
 }
 
 class MongoRepository<T extends { id: string }> implements Repository<T> {
   constructor(
-    private readonly model: Model<Stored<T>>,
-    private readonly context: AsyncLocalStorage<ClientSession>,
+    protected readonly model: Model<Stored<T>>,
+    protected readonly context: AsyncLocalStorage<ClientSession>,
   ) {}
   async findAll(): Promise<T[]> {
     const rows = await this.model
@@ -60,13 +60,22 @@ class MongoRepository<T extends { id: string }> implements Repository<T> {
   }
 }
 
+class MongoUsers extends MongoRepository<import("../domain.js").Account> {
+  async findByEmail(email: string) {
+    const row = await this.model.findOne({ email }).session(this.context.getStore() ?? null).lean<Stored<import("../domain.js").Account>>().exec();
+    return row ? fromStored<import("../domain.js").Account>(row) : undefined;
+  }
+}
 export function createMongoRepositories(
   connection: Connection,
   models: Models,
 ): Repositories {
   const context = new AsyncLocalStorage<ClientSession>();
   return {
-    users: new MongoRepository(models.users, context),
+    users: new MongoUsers(models.users, context),
+    sessions: new MongoRepository(models.sessions, context),
+    invites: new MongoRepository(models.invites, context),
+    authAttempts: new MongoRepository(models.authAttempts, context),
     clients: new MongoRepository(models.clients, context),
     deals: new MongoRepository(models.deals, context),
     tasks: new MongoRepository(models.tasks, context),

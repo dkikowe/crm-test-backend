@@ -1,12 +1,11 @@
 import mongoose from "mongoose";
 import { createModels } from "./models.js";
-import { createMongoRepositories, toStored } from "../repositories/mongo.js";
-import * as seed from "../data/seed.js";
+import { createMongoRepositories } from "../repositories/mongo.js";
+import { archiveLegacyDemo } from "./migration.js";
 
 export async function connectStorage(
   uri: string,
   databaseName: string,
-  seedDemoData = false,
 ) {
   const connection = mongoose.createConnection(uri, {
     dbName: databaseName,
@@ -37,50 +36,10 @@ export async function connectStorage(
       { upsert: true },
     );
     const repositories = createMongoRepositories(connection, models);
-    let seedResult = "disabled";
-    if (seedDemoData) {
-      seedResult = await connection.transaction(
-        async (session) => {
-          await models.meta.updateOne(
-            { _id: "write-lock" },
-            { $inc: { revision: 1 } },
-            { session },
-          );
-          if (await models.meta.exists({ _id: "seed-v1" }).session(session))
-            return "already-seeded";
-          for (const exists of [
-            () => models.users.exists({}).session(session),
-            () => models.clients.exists({}).session(session),
-            () => models.deals.exists({}).session(session),
-            () => models.tasks.exists({}).session(session),
-          ]) {
-            if (await exists()) return "existing-data";
-          }
-          // An all-or-nothing first initialization. No overwrites, no collection drops.
-          await models.users.insertMany(seed.users.map(toStored), { session });
-          await models.clients.insertMany(seed.clients.map(toStored), {
-            session,
-          });
-          await models.deals.insertMany(seed.deals.map(toStored), { session });
-          await models.tasks.insertMany(seed.tasks.map(toStored), { session });
-          await models.meta.create(
-            [
-              {
-                _id: "seed-v1",
-                revision: 1,
-                completedAt: new Date().toISOString(),
-              },
-            ],
-            { session },
-          );
-          return "created";
-        },
-        { readPreference: "primary", writeConcern: { w: "majority" } },
-      );
-    }
+    await archiveLegacyDemo(connection);
     return {
       repositories,
-      seedResult,
+
       async isHealthy() {
         if (connection.readyState !== 1 || !connection.db) return false;
         try {

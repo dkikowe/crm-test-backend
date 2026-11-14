@@ -8,9 +8,8 @@ async function main() {
   const storage = await connectStorage(
     env.MONGODB_URI,
     env.MONGODB_DB_NAME,
-    env.SEED_DEMO_DATA,
   );
-  console.log(`MongoDB connected; seed: ${storage.seedResult}`);
+  console.log("MongoDB connected");
   const server = createApp(
     env.FRONTEND_URL,
     storage.repositories,

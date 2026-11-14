@@ -16,10 +16,7 @@ const schema = z.object({
     .string()
     .regex(/^[a-zA-Z0-9_-]{1,38}$/)
     .default("salespace_crm"),
-  SEED_DEMO_DATA: z
-    .enum(["true", "false"])
-    .default("false")
-    .transform((value) => value === "true"),
+
 });
 export function readConfig(source: NodeJS.ProcessEnv = process.env) {
   const result = schema.safeParse(source);

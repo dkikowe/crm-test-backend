@@ -11,6 +11,8 @@ export interface User {
   id: string;
   name: string;
   role: "admin" | "rop" | "manager";
+  email: string;
+  createdAt: string;
 }
 export interface Owned {
   id: string;
@@ -45,3 +47,8 @@ export interface Entities {
   tasks: Task;
 }
 export type Kind = keyof Entities;
+
+export interface Account extends User { passwordHash: string; }
+export interface Session { id: string; userId: string; expiresAt: Date; }
+export interface Invite { id: string; email: string | null; role: User["role"]; expiresAt: Date; }
+export interface AuthAttempt { id: string; count: number; expiresAt: Date; }

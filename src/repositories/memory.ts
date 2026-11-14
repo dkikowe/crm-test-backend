@@ -1,5 +1,5 @@
 import type { Repositories, Repository } from "./interfaces.js";
-import * as seed from "../data/seed.js";
+import type { Account } from "../domain.js";
 export class MemoryRepository<
   T extends { id: string },
 > implements Repository<T> {
@@ -32,6 +32,9 @@ export class MemoryRepository<
   }
 }
 // Isolated adapter for tests; runtime uses MongoDB and never silently falls back.
+class MemoryUsers extends MemoryRepository<Account> {
+  async findByEmail(email: string) { return (await this.findAll()).find(u => u.email === email); }
+}
 export function createRepositories(): Repositories {
   let previous = Promise.resolve();
   return {
@@ -48,9 +51,12 @@ export function createRepositories(): Repositories {
         release();
       }
     },
-    clients: new MemoryRepository(seed.clients),
-    deals: new MemoryRepository(seed.deals),
-    tasks: new MemoryRepository(seed.tasks),
-    users: new MemoryRepository(seed.users),
+    clients: new MemoryRepository([]),
+    deals: new MemoryRepository([]),
+    tasks: new MemoryRepository([]),
+    users: new MemoryUsers([]),
+    sessions: new MemoryRepository([]),
+    invites: new MemoryRepository([]),
+    authAttempts: new MemoryRepository([]),
   };
 }

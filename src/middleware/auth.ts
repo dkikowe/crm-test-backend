@@ -1,20 +1,15 @@
-import type { RequestHandler } from "express";
-import type { UserService } from "../services/users.js";
+import type { RequestHandler, Request } from "express";
+import type { AuthService } from "../services/auth.js";
 import type { User } from "../domain.js";
 import { AppError } from "../errors.js";
-declare global {
-  namespace Express {
-    interface Request {
-      user: User;
-    }
-  }
+declare global { namespace Express { interface Request { user: User; } } }
+export function sessionToken(req: Request, name: string) {
+  return req.headers.cookie?.split(";").map(v => v.trim()).find(v => v.startsWith(`${name}=`))?.slice(name.length + 1);
 }
-export function authenticate(users: UserService): RequestHandler {
+export function authenticate(auth: AuthService, cookieName: string): RequestHandler {
   return async (req, _res, next) => {
-    const id = req.get("X-User-Id");
-    const user = id ? await users.findById(id) : undefined;
-    if (!user)
-      throw new AppError(401, "UNAUTHORIZED", "Выберите демо-пользователя");
+    const user = await auth.current(sessionToken(req, cookieName));
+    if (!user) throw new AppError(401, "UNAUTHORIZED", "Войдите в аккаунт.");
     req.user = user;
     next();
   };

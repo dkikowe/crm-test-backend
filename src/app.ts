@@ -25,12 +25,12 @@ export function createApp(
             ),
           );
       },
-      allowedHeaders: ["Content-Type", "X-User-Id"],
+      allowedHeaders: ["Content-Type", "X-CRM-Request"],
       methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     }),
   );
   app.use(express.json({ limit: "100kb" }));
-  app.use(createRoutes(repositories, isHealthy));
+  app.use(createRoutes(repositories, isHealthy, frontendUrl));
   app.use((_req, _res, next) =>
     next(new AppError(404, "NOT_FOUND", "Маршрут не найден")),
   );
