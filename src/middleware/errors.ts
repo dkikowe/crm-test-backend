@@ -44,6 +44,11 @@ export const errorHandler: ErrorRequestHandler = (
     return;
   }
   const name = error instanceof Error ? error.name : "UnknownError";
+  if (["CredentialsProviderError", "NoSuchBucket", "AccessDenied", "Forbidden", "InvalidAccessKeyId", "SignatureDoesNotMatch", "PermanentRedirect", "AuthorizationHeaderMalformed"].includes(name)) {
+    console.error("File storage unavailable", { type: name });
+    res.status(503).json({ error: { code: "STORAGE_UNAVAILABLE", message: "Хранилище файлов недоступно. Проверьте настройки S3 и права ключа доступа на сервере." } });
+    return;
+  }
   const code =
     error && typeof error === "object" && "code" in error
       ? error.code

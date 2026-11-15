@@ -1,3 +1,5 @@
+import type { FileStorage } from "../storage/interface.js";
+import { FileService } from "../services/files.js";
 import { Router } from "express";
 import { AuthService, publicUser, SESSION_MS } from "../services/auth.js";
 import { z } from "zod";
@@ -10,10 +12,12 @@ export function createRoutes(
   repositories: Repositories,
   isHealthy: () => Promise<boolean>,
   frontendUrl: string,
+  storage?: FileStorage,
 ) {
   const router = Router();
   const service = new CrmService(repositories);
   const auth = new AuthService(repositories);
+  const files = new FileService(repositories, storage);
   const secure = frontendUrl.startsWith("https:");
   const cookieName = secure ? "__Host-salespace" : "salespace_session";
   const cookieOptions = { httpOnly: true, secure, sameSite: "lax" as const, path: "/" };
@@ -63,6 +67,13 @@ export function createRoutes(
     const { role } = z.object({ role: z.enum(["admin", "rop", "manager"]) }).strict().parse(req.body);
     res.json(await auth.setRole(req.user, String(req.params.id), role));
   });
+  router.get("/clients/:clientId/files", async (req, res) => { res.json(await files.list(String(req.params.clientId), req.user)); });
+  router.post("/clients/:clientId/files", async (req, res) => { res.status(201).json(await files.begin(String(req.params.clientId), req.body, req.user)); });
+  router.post("/clients/:clientId/files/:fileId/upload-url", async (req, res) => { res.json(await files.uploadUrl(String(req.params.clientId), String(req.params.fileId), req.user)); });
+  router.post("/clients/:clientId/files/:fileId/parts/:partNumber/url", async (req, res) => { res.json(await files.partUrl(String(req.params.clientId), String(req.params.fileId), Number(req.params.partNumber), req.user)); });
+  router.post("/clients/:clientId/files/:fileId/complete", async (req, res) => { res.json(await files.complete(String(req.params.clientId), String(req.params.fileId), req.body, req.user)); });
+  router.post("/clients/:clientId/files/:fileId/abort", async (req, res) => { await files.abort(String(req.params.clientId), String(req.params.fileId), req.user); res.status(204).end(); });
+  router.get("/clients/:clientId/files/:fileId/view-url", async (req, res) => { res.json(await files.view(String(req.params.clientId), String(req.params.fileId), req.user)); });
   for (const kind of ["clients", "deals", "tasks"] as const) {
     router.get(`/${kind}`, async (req, res) => {
       res.json(await service.list(kind, req.user));

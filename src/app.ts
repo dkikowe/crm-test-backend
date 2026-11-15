@@ -1,3 +1,4 @@
+import type { FileStorage } from "./storage/interface.js";
 import express from "express";
 import cors from "cors";
 import { createRoutes } from "./routes/index.js";
@@ -8,6 +9,7 @@ export function createApp(
   frontendUrl: string,
   repositories: Repositories,
   isHealthy: () => Promise<boolean> = async () => true,
+  storage?: FileStorage,
 ) {
   const app = express();
   app.disable("x-powered-by");
@@ -30,7 +32,7 @@ export function createApp(
     }),
   );
   app.use(express.json({ limit: "100kb" }));
-  app.use(createRoutes(repositories, isHealthy, frontendUrl));
+  app.use(createRoutes(repositories, isHealthy, frontendUrl, storage));
   app.use((_req, _res, next) =>
     next(new AppError(404, "NOT_FOUND", "Маршрут не найден")),
   );

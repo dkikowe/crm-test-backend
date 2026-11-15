@@ -85,3 +85,41 @@ npm start
 `npm test` проверяет регистрацию, cookie, хеши, сессии, роли, CSRF, ограничения попыток и CRUD в изолированной памяти. `test:mongo` создаёт случайную базу `salespace_test_*`, проверяет миграцию, сохранение аккаунтов/сессий, уникальность email и транзакции, затем удаляет только эту тестовую базу. Рабочая база тестами не изменяется.
 
 Railway: репозиторий backend, Root Directory `.`, Node.js 22.x, Build `npm ci && npm run build`, Start `npm start`, health `/health`. Переменные — таблица выше. Доступ Atlas должен быть разрешён серверу API. URI и секреты не передаются во фронтенд и Git. Старые демо-сессии после обновления перестают работать; пользователям нужно зарегистрироваться.
+
+## Файлы клиентов (S3)
+
+В Railway Variables добавьте **только на backend**:
+
+```dotenv
+S3_ENDPOINT=https://s3.ap-southeast-2.amazonaws.com
+S3_REGION=ap-southeast-2
+S3_BUCKET=test-learn-didar-bucket
+AWS_ACCESS_KEY_ID=<ключ доступа>
+AWS_SECRET_ACCESS_KEY=<секретный ключ>
+```
+
+Для временных AWS credentials дополнительно нужен `AWS_SESSION_TOKEN`. SDK также поддерживает IAM role. Для S3-совместимого сервиса замените endpoint, регион и бакет; при необходимости задайте `S3_FORCE_PATH_STYLE=true`. Без конфигурации CRM работает, загрузка возвращает понятную ошибку 503. Ключи не помещать в Git или `NEXT_PUBLIC_*`.
+
+Бакет остаётся приватным, Block Public Access включён. В S3 → Permissions → CORS вставьте массив из `deploy/s3-cors.json`; для других доменов замените AllowedOrigins. `ExposeHeaders: ETag` обязателен для multipart. CORS не даёт публичного доступа к объектам.
+
+Права серверного IAM principal: `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject`, `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts` на `arn:aws:s3:::test-learn-didar-bucket/clients/*`; `s3:ListBucket` на сам бакет (нужен в том числе для корректного ответа 404 от HeadObject). При использовании SSE-KMS нужны отдельные разрешения на соответствующий KMS key. Не используйте корневые ключи AWS.
+
+В Management → Lifecycle добавьте правило для `clients/`, которое отменяет незавершённые multipart uploads через 1 день. Оно страхует сбой между созданием multipart в S3 и записью UploadId в MongoDB. Не включайте удаление готовых объектов этим правилом. API каждые 5 минут очищает истёкшие незавершённые загрузки из S3 и MongoDB; окно загрузки — 24 часа.
+
+Форматы и ограничения (1 МБ = 1024² байт): OGG/MP3 до 20 МБ; JPEG/PNG/WebP до 10 МБ; MP4 до 500 МБ. Видео всегда загружается частями по 8 МБ, последняя часть может быть меньше. Фронтенд получает свежую ссылку для каждой части, показывает прогресс и поддерживает отмену и повтор запроса. Бинарные данные идут напрямую из браузера в S3, не через Railway/Vercel.
+
+Маршруты (все требуют сессии; POST также требует `X-CRM-Request: 1`):
+
+- `GET /clients/:clientId/files` — список метаданных.
+- `POST /clients/:clientId/files` — начало: `type` (audio/photo/video), `name`, `contentType`, `size`, необязательное `description`.
+- `POST /clients/:clientId/files/:id/upload-url` — PUT URL для аудио/фото.
+- `POST /clients/:clientId/files/:id/parts/:partNumber/url` — PUT URL части видео.
+- `POST /clients/:clientId/files/:id/complete` — проверка и публикация; для видео `parts: [{partNumber, etag}]`.
+- `POST /clients/:clientId/files/:id/abort` — отмена незавершённой загрузки.
+- `GET /clients/:clientId/files/:id/view-url` — временный GET URL готового файла.
+
+Каждая ссылка выдаётся после проверки текущего владельца клиента; менеджер видит только своих, РОП и администратор — всех. Сервер назначает `ownerId`, `uploadedBy`, UUID и ключ `clients/{clientId}/{type}/{uuid}`. Метаданные и описание хранятся в коллекции `files`, ссылки не сохраняются в базе. Клиент с файлами не удаляется и не передаётся другому владельцу.
+
+Upload URL действует 300 секунд; view URL — 900. Выданная ссылка является bearer-доступом до истечения срока; logout не отзывает уже выданный URL. PUT подписан с точным Content-Length; одиночные загрузки и завершение multipart используют `If-None-Match: *`, чтобы ранее выданный URL не заменил сохранённый объект. До статуса ready сервер сверяет размер, MIME, сигнатуру контейнера, для видео — номера/размеры/ETag всех частей. Это проверка формата, не антивирус и не полное декодирование; воспроизведение зависит от кодеков браузера.
+
+`npm test` дополнительно проверяет лимиты, чужие файлы, подписи URL, завершение/отмену и multipart. `npm run test:mongo` проверяет сохранность метаданных и индексы files в отдельной временной базе.

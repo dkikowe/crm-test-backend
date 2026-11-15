@@ -6,9 +6,11 @@ import mongoose from "mongoose";
 import { connectStorage } from "../src/database/connection.js";
 import { AuthService } from "../src/services/auth.js";
 import { CrmService } from "../src/services/crm.js";
+import { FileService } from "../src/services/files.js";
+import type { ClientFile } from "../src/domain.js";
 import { newToken, tokenHash } from "../src/security/passwords.js";
 
-test("MongoDB: migration, authentication, persistence and transactions", { skip: process.env.RUN_MONGODB_TESTS !== "true", timeout: 120000 }, async t => {
+test("MongoDB: migration, authentication, persistence and transactions", { skip: process.env.RUN_MONGODB_TESTS !== "true", timeout: 240000 }, async t => {
   const uri = process.env.MONGODB_URI; assert(uri);
   const databaseName = `salespace_test_${randomUUID().replaceAll("-", "").slice(0, 16)}`;
   let storage: Awaited<ReturnType<typeof connectStorage>> | undefined;
@@ -57,6 +59,20 @@ test("MongoDB: migration, authentication, persistence and transactions", { skip:
       const results = await Promise.allSettled([1, 2].map(() => auth.register({ name: "Unique", email: "unique@example.com", password: "Secure unique password!" })));
       assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
       assert.equal((await storage!.repositories.users.findAll()).filter(u => u.email === "unique@example.com").length, 1);
+    });
+    await t.test("file metadata persists in files with dates, ownership and unique keys", async () => {
+      const record: ClientFile = { id: randomUUID(), clientId: "real-client", ownerId: admin.user.id, uploadedBy: admin.user.id, name: "integration.png", description: "MongoDB integration test", type: "photo", contentType: "image/png", size: 67, key: `clients/real-client/photo/${randomUUID()}`, status: "ready", uploadId: null, uploadExpiresAt: new Date(Date.now() + 86400000), leaseUntil: null, etag: "test-etag", createdAt: new Date().toISOString() };
+      await storage!.repositories.files.create(record);
+      await storage!.close(); storage = await connectStorage(uri, databaseName);
+      const stored = await storage.repositories.files.findById(record.id);
+      assert.equal(stored?.ownerId, admin.user.id);
+      assert(stored?.uploadExpiresAt instanceof Date);
+      assert.equal(await raw.db!.collection("files").countDocuments(), 1);
+      await assert.rejects(storage.repositories.files.create({ ...record, id: randomUUID() }), { code: 11000 });
+      const files = new FileService(storage.repositories);
+      assert.equal((await files.list("real-client", admin.user)).length, 1);
+      await assert.rejects(files.list("real-client", manager.user), { status: 404 });
+      await assert.rejects(new CrmService(storage.repositories).deleteClient("real-client", admin.user), { status: 409 });
     });
     await t.test("session and password survive reconnect; logout remains revoked", async () => {
       await storage!.close(); storage = await connectStorage(uri, databaseName); crm = new CrmService(storage.repositories);

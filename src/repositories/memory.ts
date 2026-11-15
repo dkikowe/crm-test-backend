@@ -51,6 +51,7 @@ export function createRepositories(): Repositories {
         release();
       }
     },
+    files: new MemoryRepository([]),
     clients: new MemoryRepository([]),
     deals: new MemoryRepository([]),
     tasks: new MemoryRepository([]),

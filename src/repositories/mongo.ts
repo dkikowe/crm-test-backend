@@ -72,6 +72,7 @@ export function createMongoRepositories(
 ): Repositories {
   const context = new AsyncLocalStorage<ClientSession>();
   return {
+    files: new MongoRepository(models.files, context),
     users: new MongoUsers(models.users, context),
     sessions: new MongoRepository(models.sessions, context),
     invites: new MongoRepository(models.invites, context),

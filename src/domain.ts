@@ -52,3 +52,20 @@ export interface Account extends User { passwordHash: string; }
 export interface Session { id: string; userId: string; expiresAt: Date; }
 export interface Invite { id: string; email: string | null; role: User["role"]; expiresAt: Date; }
 export interface AuthAttempt { id: string; count: number; expiresAt: Date; }
+
+export type FileType = "audio" | "photo" | "video";
+export interface ClientFile extends Owned {
+  clientId: string;
+  uploadedBy: string;
+  type: FileType;
+  name: string;
+  description: string;
+  contentType: string;
+  size: number;
+  key: string;
+  status: "uploading" | "completing" | "ready" | "aborted" | "failed";
+  uploadId: string | null;
+  uploadExpiresAt: Date;
+  leaseUntil: Date | null;
+  etag: string | null;
+}

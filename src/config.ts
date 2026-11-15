@@ -1,6 +1,10 @@
 import { z } from "zod";
 
 const schema = z.object({
+  S3_ENDPOINT: z.url().optional(),
+  S3_REGION: z.string().min(1).optional(),
+  S3_BUCKET: z.string().min(3).optional(),
+  S3_FORCE_PATH_STYLE: z.enum(["true", "false"]).default("false").transform(v => v === "true"),
   PORT: z.coerce.number().int().min(1).max(65535).default(4000),
   FRONTEND_URL: z
     .url()

@@ -102,7 +102,7 @@ export class CrmService {
       throw new AppError(
         409,
         "HAS_RELATIONS",
-        "Нельзя сменить ответственного у клиента со сделками или задачами",
+        "Нельзя сменить ответственного у клиента со сделками, задачами или файлами",
       );
     }
     const result = await this.repo(kind).update(
@@ -116,7 +116,8 @@ export class CrmService {
     // MongoDB transactions require sequential operations on their session.
     const deals = await this.repositories.deals.findAll();
     const tasks = await this.repositories.tasks.findAll();
-    return [...deals, ...tasks].some((row) => row.clientId === clientId);
+    const files = await this.repositories.files.findAll();
+    return [...deals, ...tasks, ...files].some((row) => row.clientId === clientId);
   }
   async deleteClient(id: string, user: User) {
     return this.repositories.transaction(() =>
@@ -129,7 +130,7 @@ export class CrmService {
       throw new AppError(
         409,
         "HAS_RELATIONS",
-        "У клиента есть сделки или задачи. Удаление недоступно, чтобы сохранить историю.",
+        "У клиента есть сделки, задачи или файлы. Удаление недоступно, чтобы сохранить историю.",
       );
     await this.repositories.clients.delete(id);
   }

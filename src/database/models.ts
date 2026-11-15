@@ -1,5 +1,5 @@
 import { Schema, type Connection } from "mongoose";
-import type { Client, Deal, Task, Account, Session, Invite, AuthAttempt } from "../domain.js";
+import type { Client, Deal, Task, Account, Session, Invite, AuthAttempt, ClientFile } from "../domain.js";
 import { stages } from "../domain.js";
 
 // String _id preserves the existing public IDs (including demo IDs and UUIDs).
@@ -83,6 +83,21 @@ export function createModels(connection: Connection) {
   );
   taskSchema.index({ ownerId: 1, completed: 1, dueDate: 1 });
   taskSchema.index({ clientId: 1 });
+  const fileSchema = new Schema<Stored<ClientFile>>({
+    ...owned,
+    clientId: { type: String, required: true }, uploadedBy: { type: String, required: true },
+    type: { type: String, enum: ["audio", "photo", "video"], required: true },
+    name: { type: String, required: true }, description: { type: String, default: "" },
+    contentType: { type: String, required: true }, size: { type: Number, required: true },
+    key: { type: String, required: true },
+    status: { type: String, enum: ["uploading", "completing", "ready", "aborted", "failed"], required: true },
+    uploadId: { type: String, default: null }, uploadExpiresAt: { type: Date, required: true },
+    leaseUntil: { type: Date, default: null }, etag: { type: String, default: null },
+  }, options);
+  fileSchema.index({ clientId: 1, createdAt: -1 });
+  fileSchema.index({ ownerId: 1 });
+  fileSchema.index({ key: 1 }, { unique: true });
+  fileSchema.index({ status: 1, uploadExpiresAt: 1 });
   const metaSchema = new Schema<{
     _id: string;
     revision: number;
@@ -96,6 +111,7 @@ export function createModels(connection: Connection) {
     options,
   );
   return {
+    files: connection.model<Stored<ClientFile>>("ClientFile", fileSchema, "files"),
     sessions: connection.model<Stored<Session>>("Session", sessionSchema, "sessions"),
     invites: connection.model<Stored<Invite>>("Invite", inviteSchema, "invites"),
     authAttempts: connection.model<Stored<AuthAttempt>>("AuthAttempt", attemptSchema, "auth_attempts"),

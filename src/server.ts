@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { S3FileStorage } from "./storage/s3.js";
+import { FileService } from "./services/files.js";
 import { createApp } from "./app.js";
 import { readConfig } from "./config.js";
 import { connectStorage } from "./database/connection.js";
@@ -10,10 +12,18 @@ async function main() {
     env.MONGODB_DB_NAME,
   );
   console.log("MongoDB connected");
+  const fileStorage = env.S3_ENDPOINT && env.S3_REGION && env.S3_BUCKET
+    ? new S3FileStorage({ endpoint: env.S3_ENDPOINT, region: env.S3_REGION, bucket: env.S3_BUCKET, forcePathStyle: env.S3_FORCE_PATH_STYLE }) : undefined;
+  const fileService = new FileService(storage.repositories, fileStorage);
+  let sweeping = false;
+  const sweep = async () => { if (sweeping) return; sweeping = true; try { await fileService.cleanupExpired(); } catch { console.warn("Очистка загрузок временно недоступна"); } finally { sweeping = false; } };
+  const cleanupTimer = setInterval(() => void sweep(), 5 * 60 * 1000).unref();
+  void sweep();
   const server = createApp(
     env.FRONTEND_URL,
     storage.repositories,
     storage.isHealthy,
+    fileStorage,
   ).listen(env.PORT, "0.0.0.0", () => {
     console.log(`Salespace API listening on port ${env.PORT}`);
   });
@@ -21,6 +31,7 @@ async function main() {
   async function shutdown() {
     if (stopping) return;
     stopping = true;
+    clearInterval(cleanupTimer);
     const timeout = setTimeout(() => process.exit(1), 10000).unref();
     server.close(async () => {
       await storage.close();

@@ -1,4 +1,4 @@
-import type { Entities, Account, Session, Invite, AuthAttempt } from "../domain.js";
+import type { Entities, Account, Session, Invite, AuthAttempt, ClientFile } from "../domain.js";
 // Storage-independent contracts shared by the memory and MongoDB adapters.
 export interface Repository<T extends { id: string }> {
   findAll(): Promise<T[]>;
@@ -13,6 +13,7 @@ export interface UserRepository extends Repository<Account> {
 export type Repositories = {
   [K in keyof Entities]: Repository<Entities[K]>;
 } & {
+  files: Repository<ClientFile>;
   users: UserRepository;
   sessions: Repository<Session>;
   invites: Repository<Invite>;
