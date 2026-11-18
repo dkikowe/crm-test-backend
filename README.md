@@ -56,6 +56,20 @@ npm run admin:invite -- admin@your-company.kz /absolute/private/admin-invite.txt
 
 ## API
 
+### Вебхук WhatsApp Cloud API
+
+Callback URL для Meta: `https://crm-test-backend-production-7f1aec08.up.railway.app/webhooks/whatsapp`.
+В Railway Variables задайте `WHATSAPP_VERIFY_TOKEN` (собственная случайная строка, та же в поле Verify token в Meta) и `WHATSAPP_APP_SECRET` (App Secret приложения Meta). Оба значения читаются только из окружения backend; в Git и frontend их добавлять нельзя. После изменения переменных примените новый deployment. Остальная CRM работает и без этих переменных; незаданный verify token даёт 403, незаданный App Secret — 503 на POST.
+
+- `GET /webhooks/whatsapp`: при `hub.mode=subscribe`, правильном `hub.verify_token` и строковом `hub.challenge` возвращает challenge без JSON-кавычек, `Content-Type: text/plain`, статус 200. Иначе 403.
+- `POST /webhooks/whatsapp`: проверяет `X-Hub-Signature-256: sha256=<64 hex symbols>` через HMAC-SHA256 от **исходных байтов тела**, сравнение constant-time. Отсутствующая, некорректная или неверная подпись даёт 401. Cookie CRM и `X-CRM-Request` не требуются: webhook подключён до CORS/CSRF/авторизации и общего JSON-парсера, остальные маршруты сохраняют защиту.
+- После проверки подписи сервер возвращает `200 OK`. Только после события `finish` ответа, через `setImmediate`, разбирает JSON и логирует сводку: объект WhatsApp, количество entries/changes/messages/statuses/errors. Тексты сообщений, контакты, секреты и заголовки не логируются. Ошибка JSON или обработчика после ответа фиксируется отдельным безопасным сообщением и не меняет HTTP-ответ.
+- Лимит тела — 1 МБ (превышение: 413); сжатые запросы не принимаются (415), чтобы подпись не проверялась по изменённому распаковкой телу.
+
+Обработка пока выполняется в процессе сервера, без очереди, сохранения событий и дедупликации. Перезапуск после ответа может потерять событие; повторная доставка будет повторно залогирована. Это подходит для текущего этапа с логированием; перед добавлением бизнес-операций потребуется надёжная очередь/хранилище и идемпотентность.
+
+`npm test` покрывает handshake, подписи по исходному UTF-8 (включая пробелы и escape-последовательности), подмену тела, отсутствие секретов, отправку ответа до обработки, ошибки обработчика и сохранение защиты CRM. Проверка протокола: [документация Meta](https://developers.facebook.com/docs/graph-api/webhooks/getting-started/).
+
 Публичные: `GET /health`, `POST /auth/register`, `POST /auth/login`, `POST /auth/logout`.
 
 После входа:

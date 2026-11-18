@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 const schema = z.object({
+  WHATSAPP_VERIFY_TOKEN: z.string().optional(),
+  WHATSAPP_APP_SECRET: z.string().optional(),
   S3_ENDPOINT: z.url().optional(),
   S3_REGION: z.string().min(1).optional(),
   S3_BUCKET: z.string().min(3).optional(),

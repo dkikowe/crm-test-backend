@@ -5,14 +5,19 @@ import { createRoutes } from "./routes/index.js";
 import type { Repositories } from "./repositories/interfaces.js";
 import { errorHandler } from "./middleware/errors.js";
 import { AppError } from "./errors.js";
+import { createWhatsAppWebhookRoutes, type WhatsAppWebhookConfig } from "./routes/whatsapp.js";
 export function createApp(
   frontendUrl: string,
   repositories: Repositories,
   isHealthy: () => Promise<boolean> = async () => true,
   storage?: FileStorage,
+  whatsapp: WhatsAppWebhookConfig = {},
 ) {
   const app = express();
   app.disable("x-powered-by");
+  // Meta authenticates with an HMAC, not a CRM session/CSRF token or browser Origin.
+  // Keep this route before all JSON parsers so signatures use the exact raw bytes.
+  app.use("/webhooks/whatsapp", createWhatsAppWebhookRoutes(whatsapp));
   app.use(
     cors({
       origin(origin, callback) {

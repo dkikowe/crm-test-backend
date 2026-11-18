@@ -24,6 +24,7 @@ async function main() {
     storage.repositories,
     storage.isHealthy,
     fileStorage,
+    { verifyToken: env.WHATSAPP_VERIFY_TOKEN, appSecret: env.WHATSAPP_APP_SECRET },
   ).listen(env.PORT, "0.0.0.0", () => {
     console.log(`Salespace API listening on port ${env.PORT}`);
   });
